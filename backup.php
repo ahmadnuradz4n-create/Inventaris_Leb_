@@ -17,7 +17,6 @@ $maxUploadBytes = 100 * 1024 * 1024;
 $mysqldumpPath = 'C:\\xampp\\mysql\\bin\\mysqldump.exe';
 $mysqlPath = 'C:\\xampp\\mysql\\bin\\mysql.exe';
 
-/** Escape a value for a quoted MySQL option-file setting. */
 function backup_ini_value($value)
 {
     return '"' . str_replace(
@@ -27,7 +26,6 @@ function backup_ini_value($value)
     ) . '"';
 }
 
-/** Create a temporary MySQL client config so credentials are not put in process arguments. */
 function create_mysql_defaults_file($host, $user, $password)
 {
     $path = tempnam(sys_get_temp_dir(), 'inv-mysql-');
@@ -50,7 +48,6 @@ function create_mysql_defaults_file($host, $user, $password)
     return $path;
 }
 
-/** Run a process without a command shell and capture its output in temporary files. */
 function run_mysql_command(array $command, $inputFile = null)
 {
     $stdoutPath = tempnam(sys_get_temp_dir(), 'inv-out-');

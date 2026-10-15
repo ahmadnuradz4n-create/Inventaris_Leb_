@@ -35,7 +35,7 @@ $currentPage = max(1, min((int) ($_GET['page'] ?? 1), $totalPages));
 $offset = ($currentPage - 1) * $perPage;
 
 $itemsStmt = $conn->prepare("SELECT i.id, i.code, i.name, i.total_quantity, i.available_quantity,
-        i.`condition`, i.location, c.name AS category_name
+    i.good_quantity, i.light_damage_quantity, i.heavy_damage_quantity, i.location, c.name AS category_name
     FROM items i
     JOIN categories c ON c.id = i.category_id
     WHERE i.deleted_at IS NULL AND i.available_quantity > 0
@@ -122,21 +122,22 @@ function catalog_page_url($page, $categoryId, $search)
                 <?php if ($totalItems > 0): ?>
                     <div class="row g-3 p-3 p-md-4">
                         <?php while ($item = $items->fetch_assoc()): ?>
-                            <?php
-                                $condition = str_replace('_', ' ', $item['condition']);
-                                $conditionClass = $item['condition'] === 'baik' ? 'text-bg-success' : ($item['condition'] === 'rusak_ringan' ? 'text-bg-warning' : 'text-bg-danger');
-                            ?>
                             <div class="col-12 col-md-6 col-xl-4">
                                 <article class="catalog-item-card h-100 rounded-4 border bg-white p-4">
                                     <div class="d-flex justify-content-between align-items-start gap-3 mb-3">
                                         <span class="badge text-bg-primary-subtle text-primary-emphasis"><?php echo htmlspecialchars($item['category_name']); ?></span>
-                                        <span class="badge <?php echo $conditionClass; ?>"><?php echo htmlspecialchars(ucfirst($condition)); ?></span>
+                                        <span class="badge text-bg-success">Stok: <?php echo (int) $item['available_quantity']; ?></span>
                                     </div>
                                     <div class="small text-secondary font-monospace mb-1"><?php echo htmlspecialchars($item['code']); ?></div>
                                     <h4 class="h5 fw-bold mb-3"><?php echo htmlspecialchars($item['name']); ?></h4>
                                     <div class="catalog-stock d-flex justify-content-between align-items-center rounded-3 px-3 py-2 mb-3">
                                         <span class="small text-secondary">Stok tersedia</span>
                                         <strong class="text-success"><?php echo (int) $item['available_quantity']; ?> <span class="small fw-normal">/ <?php echo (int) $item['total_quantity']; ?> unit</span></strong>
+                                    </div>
+                                    <div class="d-flex flex-wrap gap-2 small mb-3">
+                                        <span class="badge text-bg-success">Baik: <?php echo (int) $item['good_quantity']; ?></span>
+                                        <span class="badge text-bg-warning">Rusak ringan: <?php echo (int) $item['light_damage_quantity']; ?></span>
+                                        <span class="badge text-bg-danger">Rusak berat: <?php echo (int) $item['heavy_damage_quantity']; ?></span>
                                     </div>
                                     <div class="small text-secondary">📍 <?php echo htmlspecialchars($item['location'] ?: 'Lokasi belum dicatat'); ?></div>
                                 </article>

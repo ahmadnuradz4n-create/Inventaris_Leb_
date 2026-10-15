@@ -12,7 +12,9 @@ $user_id = $_SESSION['user_id'];
 
 // Ambil riwayat peminjaman milik user yang sedang login
 $query_riwayat = "SELECT borrowings.*, items.name as item_name, borrowing_details.quantity,
-                         borrowing_details.item_condition_before, borrowing_details.item_condition_after
+                         borrowing_details.item_condition_before, borrowing_details.item_condition_after,
+                         borrowing_details.returned_good_quantity, borrowing_details.returned_light_damage_quantity,
+                         borrowing_details.returned_heavy_damage_quantity
                   FROM borrowings 
                   JOIN borrowers ON borrowings.borrower_id = borrowers.id
                   JOIN borrowing_details ON borrowings.id = borrowing_details.borrowing_id
@@ -96,10 +98,12 @@ $riwayat = $conn->query($query_riwayat);
                                         </span>
                                     </td>
                                     <td class="px-6 py-4">
-                                        <?php if (!empty($row['item_condition_after'])): ?>
+                                        <?php if ((int) $row['returned_good_quantity'] + (int) $row['returned_light_damage_quantity'] + (int) $row['returned_heavy_damage_quantity'] > 0): ?>
                                             <span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-600">
-                                                <?php echo htmlspecialchars(ucfirst(str_replace('_', ' ', $row['item_condition_after']))); ?>
+                                                Baik <?php echo (int) $row['returned_good_quantity']; ?>, ringan <?php echo (int) $row['returned_light_damage_quantity']; ?>, berat <?php echo (int) $row['returned_heavy_damage_quantity']; ?>
                                             </span>
+                                        <?php elseif (!empty($row['item_condition_after'])): ?>
+                                            <span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-600"><?php echo htmlspecialchars(ucfirst(str_replace('_', ' ', $row['item_condition_after']))); ?></span>
                                         <?php else: ?>
                                             <span class="text-slate-400">Belum dikembalikan</span>
                                         <?php endif; ?>

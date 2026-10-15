@@ -11,11 +11,10 @@ INVENTARIS LAB SAINS — PETUNJUK INSTALASI XAMPP
 
 4. Pilih database db_inventaris_sains, buka tab Import, lalu impor file:
    db_inventaris_sains.sql
-   File SQL ini disertakan sebagai salinan dari database yang diberikan dan
-   tidak diubah dalam pekerjaan redesain.
+   File SQL ini berisi struktur dan data awal aplikasi.
 
 5. Buka website di:
-   http://localhost/Inventaris_Leb-main/login.php
+   http://localhost/Inventaris_Leb-main/
 
 KONFIGURASI DATABASE
 File koneksi.php menggunakan konfigurasi bawaan XAMPP:
@@ -31,9 +30,10 @@ AKUN CONTOH DARI DATA SQL
 - Peminjam: budi.santoso@student.ac.id / password123
 
 CATATAN
-- Redesign ini berfokus pada CSS dan penanda navigasi aktif. Query SQL,
-  struktur database, proses autentikasi, session, CRUD, serta proses transaksi
-  tidak sengaja diubah.
+- Manajemen pengguna menyimpan NIK 16 digit dan alamat lengkap. Untuk database
+   lama, kolom identitas dibuat otomatis saat aplikasi pertama kali dibuka.
+- Data akun lama tetap ada; NIK dan alamatnya akan tampil sebagai "Belum diisi"
+   sampai admin melengkapinya melalui menu Edit.
 - Semua file PHP diperiksa menggunakan php -l. Pengujian integrasi login,
   CRUD, peminjaman/pengembalian, dan backup/restore tetap perlu dilakukan
   di XAMPP yang terhubung ke database, karena lingkungan pemeriksaan ini

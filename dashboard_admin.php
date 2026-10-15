@@ -10,9 +10,13 @@ if (!isset($_SESSION['user_id']) || $_SESSION['role'] !== 'admin') {
 
 // Ambil data statistik untuk Dashboard (Fitur 2)
 $q_tersedia = $conn->query("SELECT SUM(available_quantity) as total FROM items WHERE deleted_at IS NULL")->fetch_assoc()['total'] ?? 0;
-$q_dipinjam = $conn->query("SELECT COUNT(*) as total FROM borrowings WHERE status = 'dipinjam'")->fetch_assoc()['total'] ?? 0;
-$q_terlambat = $conn->query("SELECT COUNT(*) as total FROM borrowings WHERE status = 'terlambat'")->fetch_assoc()['total'] ?? 0;
-$q_hilang = $conn->query("SELECT COUNT(*) as total FROM borrowing_details WHERE status_item = 'hilang'")->fetch_assoc()['total'] ?? 0;
+$q_dipinjam = $conn->query("SELECT COUNT(*) as total FROM borrowings WHERE status IN ('dipinjam', 'terlambat') AND due_date >= NOW()")->fetch_assoc()['total'] ?? 0;
+$q_terlambat = $conn->query("SELECT COUNT(*) as total FROM borrowings WHERE status IN ('dipinjam', 'terlambat') AND due_date < NOW()")->fetch_assoc()['total'] ?? 0;
+$q_hilang = $conn->query("SELECT COALESCE(SUM(bd.quantity), 0) as total
+    FROM borrowing_details bd
+    JOIN borrowings b ON b.id = bd.borrowing_id
+    WHERE bd.status_item = 'hilang'
+       OR (bd.status_item = 'dipinjam' AND b.status IN ('dipinjam', 'terlambat') AND b.due_date < NOW())")->fetch_assoc()['total'] ?? 0;
 
 // Ambil data barang terbaru
 $items = $conn->query("SELECT items.*, categories.name as category_name FROM items JOIN categories ON items.category_id = categories.id WHERE items.deleted_at IS NULL ORDER BY items.id DESC LIMIT 5");
@@ -74,7 +78,7 @@ $items = $conn->query("SELECT items.*, categories.name as category_name FROM ite
                     <div class="text-3xl font-bold text-red-600 mt-2"><?php echo $q_terlambat; ?> <span class="text-xs font-normal text-slate-400">transaksi</span></div>
                 </div>
                 <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
-                    <div class="text-slate-500 text-sm font-medium">Barang Hilang</div>
+                    <div class="text-slate-500 text-sm font-medium">Barang Hilang / Lewat Batas</div>
                     <div class="text-3xl font-bold text-slate-700 mt-2"><?php echo $q_hilang; ?> <span class="text-xs font-normal text-slate-400">item</span></div>
                 </div>
             </div>
@@ -104,10 +108,11 @@ $items = $conn->query("SELECT items.*, categories.name as category_name FROM ite
                                 <td class="px-6 py-4"><?php echo htmlspecialchars($row['category_name']); ?></td>
                                 <td class="px-6 py-4"><?php echo $row['available_quantity']; ?> / <?php echo $row['total_quantity']; ?></td>
                                 <td class="px-6 py-4">
-                                    <span class="px-2.5 py-1 rounded-full text-xs font-semibold 
-                                        <?php echo $row['condition'] == 'baik' ? 'bg-emerald-50 text-emerald-600' : 'bg-amber-50 text-amber-600'; ?>">
-                                        <?php echo ucfirst($row['condition']); ?>
-                                    </span>
+                                    <div class="flex flex-wrap gap-1 text-xs">
+                                        <span class="rounded-full bg-emerald-50 px-2 py-1 text-emerald-700">Baik: <?php echo (int) $row['good_quantity']; ?></span>
+                                        <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700">Ringan: <?php echo (int) $row['light_damage_quantity']; ?></span>
+                                        <span class="rounded-full bg-red-50 px-2 py-1 text-red-700">Berat: <?php echo (int) $row['heavy_damage_quantity']; ?></span>
+                                    </div>
                                 </td>
                             </tr>
                             <?php endwhile; ?>

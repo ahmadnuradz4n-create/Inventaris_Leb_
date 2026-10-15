@@ -2,90 +2,128 @@
 session_start();
 include 'koneksi.php';
 
-if (!isset($_SESSION['user_id']) || $_SESSION['role'] !== 'admin') {
-    header("Location: login.php");
+if (!isset($_SESSION['user_id']) || ($_SESSION['role'] ?? '') !== 'admin') {
+    header('Location: login.php');
     exit;
 }
 
-$success = '';$error = '';
+$success = '';
+$error = '';
 
-// 1. Proses Peminjaman Baru
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['tambah_peminjaman'])) {
-    $borrower_id = intval($_POST['borrower_id']);
-    $user_id     =$_SESSION['user_id']; 
-    $borrow_type =$_POST['borrow_type']; 
-    $due_date    =$_POST['due_date'];
-    $notes       = trim($_POST['notes']);
-    $item_id     = intval($_POST['item_id']);
-    $quantity    = intval($_POST['quantity']);
-    $condition   =$_POST['condition'];
+    $borrower_id = (int) ($_POST['borrower_id'] ?? 0);
+    $user_id = (int) $_SESSION['user_id'];
+    $borrow_type = $_POST['borrow_type'] ?? '';
+    $due_date = $_POST['due_date'] ?? '';
+    $notes = trim($_POST['notes'] ?? '');
+    $item_id = (int) ($_POST['item_id'] ?? 0);
+    $quantity = (int) ($_POST['quantity'] ?? 0);
+    $condition = $_POST['condition'] ?? '';
+    $conditionColumns = ['baik' => 'good_quantity', 'rusak_ringan' => 'light_damage_quantity', 'rusak_berat' => 'heavy_damage_quantity'];
 
-    if ($borrower_id > 0 &&$item_id > 0 && $quantity > 0 && !empty($due_date)) {
-        $stmt =$conn->prepare("CALL sp_create_borrowing(?, ?, ?, ?, ?, ?, ?, ?)");
-        $stmt->bind_param("iisssiis", $borrower_id, $user_id, $borrow_type, $due_date, $notes, $item_id, $quantity, $condition);
-        
-        if ($stmt->execute()) {$success = "Transaksi peminjaman berhasil dicatat!";
-        } else {
-            $error = "Gagal memproses peminjaman: " . $stmt->error;
+    if ($borrower_id > 0 && $item_id > 0 && $quantity > 0 && $due_date !== '' && isset($conditionColumns[$condition]) && in_array($borrow_type, ['internal_lab', 'eksternal'], true)) {
+        $conn->begin_transaction();
+        try {
+            $itemStmt = $conn->prepare("SELECT id, good_quantity, light_damage_quantity, heavy_damage_quantity FROM items WHERE id = ? AND deleted_at IS NULL FOR UPDATE");
+            $itemStmt->bind_param('i', $item_id);
+            $itemStmt->execute();
+            $itemRow = $itemStmt->get_result()->fetch_assoc();
+            $itemStmt->close();
+            $stockColumn = $conditionColumns[$condition];
+            if (!$itemRow || (int) $itemRow[$stockColumn] < $quantity) throw new RuntimeException('Stok barang dengan kondisi tersebut tidak mencukupi.');
+
+            $borrowStmt = $conn->prepare("INSERT INTO borrowings (borrower_id, user_id, borrow_type, borrow_date, due_date, status, notes) VALUES (?, ?, ?, NOW(), ?, 'dipinjam', ?)");
+            $borrowStmt->bind_param('iisss', $borrower_id, $user_id, $borrow_type, $due_date, $notes);
+            if (!$borrowStmt->execute()) throw new RuntimeException($borrowStmt->error);
+            $borrowing_id = $borrowStmt->insert_id;
+            $borrowStmt->close();
+
+            $detailStmt = $conn->prepare("INSERT INTO borrowing_details (borrowing_id, item_id, quantity, item_condition_before, status_item) VALUES (?, ?, ?, ?, 'dipinjam')");
+            $detailStmt->bind_param('iiis', $borrowing_id, $item_id, $quantity, $condition);
+            if (!$detailStmt->execute()) throw new RuntimeException($detailStmt->error);
+            $detailStmt->close();
+
+            $stockStmt = $conn->prepare("UPDATE items SET `{$stockColumn}` = `{$stockColumn}` - ?, available_quantity = available_quantity - ?, status = CASE WHEN available_quantity - ? = 0 THEN 'dipinjam' ELSE 'tersedia' END WHERE id = ?");
+            $stockStmt->bind_param('iiii', $quantity, $quantity, $quantity, $item_id);
+            if (!$stockStmt->execute()) throw new RuntimeException($stockStmt->error);
+            $stockStmt->close();
+
+            $description = "Dipinjam sebanyak {$quantity} unit (Kondisi: " . str_replace('_', ' ', $condition) . ').';
+            $logStmt = $conn->prepare("INSERT INTO item_logs (item_id, user_id, action, description) VALUES (?, ?, 'perubahan_kondisi', ?)");
+            $logStmt->bind_param('iis', $item_id, $user_id, $description);
+            if (!$logStmt->execute()) throw new RuntimeException($logStmt->error);
+            $logStmt->close();
+            $conn->commit();
+            $success = 'Transaksi peminjaman berhasil dicatat!';
+        } catch (Throwable $e) {
+            $conn->rollback();
+            $error = 'Gagal memproses peminjaman: ' . $e->getMessage();
         }
-        $stmt->close();
-        while ($conn->more_results() &&$conn->next_result()) {;}
     } else {
-        $error = "Semua kolom wajib diisi dengan benar!";
+        $error = 'Semua kolom wajib diisi dengan benar.';
     }
 }
 
-// 2. Proses Simpan Pengembalian Barang Berdasarkan Kondisi Akhir
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['proses_pengembalian'])) {
-    $borrowing_id = intval($_POST['borrowing_id']);
-    $condition_after =$_POST['item_condition_after']; // 'baik', 'rusak_ringan', 'rusak_berat'
-    $admin_id     =$_SESSION['user_id'];
+    $borrowing_id = (int) ($_POST['borrowing_id'] ?? 0);
+    $returnedGood = max(0, (int) ($_POST['returned_good_quantity'] ?? 0));
+    $returnedLight = max(0, (int) ($_POST['returned_light_damage_quantity'] ?? 0));
+    $returnedHeavy = max(0, (int) ($_POST['returned_heavy_damage_quantity'] ?? 0));
+    $admin_id = (int) $_SESSION['user_id'];
 
     $conn->begin_transaction();
     try {
-        // Ambil detail item & jumlah yang dipinjam
-        $q_detail =$conn->prepare("SELECT item_id, quantity FROM borrowing_details WHERE borrowing_id = ?");
-        $q_detail->bind_param("i", $borrowing_id);$q_detail->execute();
-        $res_detail =$q_detail->get_result();
-        
-        while ($detail =$res_detail->fetch_assoc()) {
-            $itm_id  =$detail['item_id'];
-            $qty_brw =$detail['quantity'];
+        $detailStmt = $conn->prepare("SELECT bd.item_id, bd.quantity FROM borrowing_details bd JOIN borrowings b ON b.id = bd.borrowing_id WHERE bd.borrowing_id = ? AND bd.status_item = 'dipinjam' AND b.status IN ('dipinjam', 'terlambat') FOR UPDATE");
+        $detailStmt->bind_param('i', $borrowing_id);
+        $detailStmt->execute();
+        $detail = $detailStmt->get_result()->fetch_assoc();
+        $detailStmt->close();
+        if (!$detail) throw new RuntimeException('Peminjaman aktif tidak ditemukan atau sudah diproses.');
+        $returnedTotal = $returnedGood + $returnedLight + $returnedHeavy;
+        if ($returnedTotal !== (int) $detail['quantity']) throw new RuntimeException('Jumlah kondisi yang dikembalikan harus sama dengan jumlah unit yang dipinjam.');
 
-            // ATURAN STOK BERDASARKAN KONDISI AKHIR:
-            // Jika kembali dalam kondisi 'baik', stok 'available_quantity' dikembalikan.
-            // Jika rusak, stok tidak otomatis masuk ke 'available_quantity' (bisa dicatat ke log kerusakan).
-            if ($condition_after === 'baik') {$conn->query("UPDATE items SET available_quantity = available_quantity + $qty_brw, status = 'tersedia' WHERE id =$itm_id");
-            } else {
-                // Jika rusak, total quantity bisa dikurangi atau dicatat sebagai unit rusak (opsional sesuai kebijakan lab)
-                $conn->query("UPDATE items SET `condition` = '$condition_after' WHERE id =$itm_id");
-            }
+        $item_id = (int) $detail['item_id'];
+        $stockStmt = $conn->prepare("UPDATE items SET good_quantity = good_quantity + ?, light_damage_quantity = light_damage_quantity + ?, heavy_damage_quantity = heavy_damage_quantity + ?, available_quantity = available_quantity + ?, status = 'tersedia' WHERE id = ?");
+        $stockStmt->bind_param('iiiii', $returnedGood, $returnedLight, $returnedHeavy, $returnedTotal, $item_id);
+        if (!$stockStmt->execute()) throw new RuntimeException($stockStmt->error);
+        $stockStmt->close();
 
-            $conn->query("INSERT INTO item_logs (item_id, user_id, action, description) VALUES ($itm_id, $admin_id, 'perubahan_kondisi', 'Barang dikembalikan dengan kondisi:$condition_after')");
-        }
-        $q_detail->close();
+        $conditionAfter = $returnedGood === $returnedTotal ? 'baik' : ($returnedLight === $returnedTotal ? 'rusak_ringan' : ($returnedHeavy === $returnedTotal ? 'rusak_berat' : null));
+        $updateDetail = $conn->prepare("UPDATE borrowing_details SET status_item = 'dikembalikan', item_condition_after = ?, returned_good_quantity = ?, returned_light_damage_quantity = ?, returned_heavy_damage_quantity = ? WHERE borrowing_id = ?");
+        $updateDetail->bind_param('siiii', $conditionAfter, $returnedGood, $returnedLight, $returnedHeavy, $borrowing_id);
+        if (!$updateDetail->execute()) throw new RuntimeException($updateDetail->error);
+        $updateDetail->close();
 
-        // Update status transaksi peminjaman
-        $conn->query("UPDATE borrowings SET status = 'dikembalikan', return_date = NOW() WHERE id = $borrowing_id");
-        
-        // Update detail item
-        $conn->query("UPDATE borrowing_details SET status_item = 'dikembalikan', item_condition_after = '$condition_after' WHERE borrowing_id =$borrowing_id");
+        $updateBorrowing = $conn->prepare("UPDATE borrowings SET status = 'dikembalikan', return_date = NOW() WHERE id = ?");
+        $updateBorrowing->bind_param('i', $borrowing_id);
+        if (!$updateBorrowing->execute()) throw new RuntimeException($updateBorrowing->error);
+        $updateBorrowing->close();
 
-        $conn->commit();$success = "Pengembalian berhasil diproses dengan kondisi akhir: " . ucfirst(str_replace('_', ' ', $condition_after));
-    } catch (Exception $e) {
-        $conn->rollback();$error = "Gagal memproses pengembalian: " . $e->getMessage();
+        $description = "Pengembalian: {$returnedGood} baik, {$returnedLight} rusak ringan, {$returnedHeavy} rusak berat.";
+        $logStmt = $conn->prepare("INSERT INTO item_logs (item_id, user_id, action, description) VALUES (?, ?, 'perubahan_kondisi', ?)");
+        $logStmt->bind_param('iis', $item_id, $admin_id, $description);
+        if (!$logStmt->execute()) throw new RuntimeException($logStmt->error);
+        $logStmt->close();
+        $conn->commit();
+        $success = $description;
+    } catch (Throwable $e) {
+        $conn->rollback();
+        $error = 'Gagal memproses pengembalian: ' . $e->getMessage();
     }
 }
 
 $borrowers =$conn->query("SELECT id, name, identity_number, type FROM borrowers ORDER BY name ASC");
-$items =$conn->query("SELECT id, name, code, available_quantity FROM items WHERE available_quantity > 0 AND deleted_at IS NULL ORDER BY name ASC");
+$items =$conn->query("SELECT id, name, code, available_quantity, good_quantity, light_damage_quantity, heavy_damage_quantity FROM items WHERE available_quantity > 0 AND deleted_at IS NULL ORDER BY name ASC");
+$itemOptions = $items ? $items->fetch_all(MYSQLI_ASSOC) : [];
 
 // Pastikan query ini mencakup kolom item_condition_before secara eksplisit
-$query_aktif = "SELECT b.id, br.name as borrower_name, br.identity_number, 
+$query_aktif = "SELECT b.id, br.name as borrower_name, br.identity_number,
+                       u.nik AS borrower_nik, u.alamat AS borrower_address,
                        b.borrow_type, b.borrow_date, b.due_date, b.status, b.notes,
                        i.name as item_name, bd.quantity, bd.item_condition_before
                 FROM borrowings b
                 JOIN borrowers br ON b.borrower_id = br.id
+                LEFT JOIN users u ON u.id = br.user_id
                 JOIN borrowing_details bd ON b.id = bd.borrowing_id
                 JOIN items i ON bd.item_id = i.id
                 WHERE b.status IN ('dipinjam', 'terlambat')
@@ -106,13 +144,15 @@ if (isset($_GET['export']) && $_GET['export'] === 'excel') {
     $output = fopen('php://output', 'w');
     fwrite($output, "\xEF\xBB\xBF");
     fputcsv($output, ['sep=;'], ';');
-    fputcsv($output, ['ID Transaksi', 'Nama Peminjam', 'Nomor Identitas', 'Nama Barang', 'Jumlah', 'Tipe Peminjaman', 'Tanggal Pinjam', 'Batas Waktu', 'Status', 'Kondisi Awal', 'Catatan'], ';');
+    fputcsv($output, ['ID Transaksi', 'Nama Peminjam', 'Nomor Identitas', 'NIK / KTP', 'Alamat', 'Nama Barang', 'Jumlah', 'Tipe Peminjaman', 'Tanggal Pinjam', 'Batas Waktu', 'Status', 'Kondisi Awal', 'Catatan'], ';');
 
     while ($row = $exportResult->fetch_assoc()) {
         $values = [
             $row['id'],
             $row['borrower_name'],
             $row['identity_number'],
+            $row['borrower_nik'] ?: 'Belum diisi',
+            $row['borrower_address'] ?: 'Belum diisi',
             $row['item_name'],
             $row['quantity'],
             ucfirst(str_replace('_', ' ', $row['borrow_type'])),
@@ -207,7 +247,7 @@ $transaksi_aktif = $conn->query($query_aktif . " LIMIT {$perPage} OFFSET {$offse
             <!-- Form Peminjaman Baru -->
             <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
                 <h3 class="font-bold text-slate-800 mb-4 pb-2 border-b border-slate-100">➕ Catat Peminjaman Baru (Dengan Kondisi Awal)</h3>
-                <form action="" method="POST" class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <form id="borrow-form" action="" method="POST" class="grid grid-cols-1 md:grid-cols-3 gap-4">
                     <div>
                         <label class="block text-xs font-medium text-slate-700 mb-1">Pilih Peminjam</label>
                         <select name="borrower_id" required class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white focus:ring-2 focus:ring-indigo-500">
@@ -231,28 +271,53 @@ $transaksi_aktif = $conn->query($query_aktif . " LIMIT {$perPage} OFFSET {$offse
                         <input type="datetime-local" name="due_date" required class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500">
                     </div>
 
-                    <div>
-                        <label class="block text-xs font-medium text-slate-700 mb-1">Pilih Barang</label>
-                        <select name="item_id" required class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white focus:ring-2 focus:ring-indigo-500">
-                            <option value="">-- Barang Tersedia --</option>
-                            <?php while ($item =$items->fetch_assoc()): ?>
-                                <option value="<?php echo $item['id']; ?>"><?php echo htmlspecialchars($item['name'] . ' (Tersedia: ' .$item['available_quantity'] . ')'); ?></option>
-                            <?php endwhile; ?>
-                        </select>
+                    <div class="item-picker" id="item-picker">
+                        <label for="item-search" class="block text-xs font-medium text-slate-700 mb-1">Pilih Barang</label>
+                        <div class="item-picker-search-wrap">
+                            <span class="item-picker-search-icon" aria-hidden="true">⌕</span>
+                            <input type="search" id="item-search" required autocomplete="off" placeholder="Cari nama atau kode barang..." aria-autocomplete="list" aria-controls="item-picker-results" aria-expanded="false" class="item-picker-search">
+                            <input type="hidden" name="item_id" id="item-id">
+                        </div>
+                        <div id="item-picker-results" class="item-picker-results" role="listbox" hidden>
+                            <?php foreach ($itemOptions as $item): ?>
+                                <?php $itemSearchText = strtolower($item['name'] . ' ' . $item['code']); ?>
+                                <button type="button" class="item-picker-option" role="option"
+                                    data-id="<?php echo (int) $item['id']; ?>"
+                                    data-name="<?php echo htmlspecialchars($item['name'], ENT_QUOTES, 'UTF-8'); ?>"
+                                    data-code="<?php echo htmlspecialchars($item['code'], ENT_QUOTES, 'UTF-8'); ?>"
+                                    data-search="<?php echo htmlspecialchars($itemSearchText, ENT_QUOTES, 'UTF-8'); ?>"
+                                    data-good="<?php echo (int) $item['good_quantity']; ?>"
+                                    data-light="<?php echo (int) $item['light_damage_quantity']; ?>"
+                                    data-heavy="<?php echo (int) $item['heavy_damage_quantity']; ?>">
+                                    <span class="item-picker-option-copy">
+                                        <strong><?php echo htmlspecialchars($item['name']); ?></strong>
+                                        <small><?php echo htmlspecialchars($item['code']); ?></small>
+                                    </span>
+                                    <span class="item-picker-counts">
+                                        <span class="item-count-good">Baik <?php echo (int) $item['good_quantity']; ?></span>
+                                        <span class="item-count-light">Ringan <?php echo (int) $item['light_damage_quantity']; ?></span>
+                                        <span class="item-count-heavy">Berat <?php echo (int) $item['heavy_damage_quantity']; ?></span>
+                                    </span>
+                                </button>
+                            <?php endforeach; ?>
+                            <div id="item-picker-empty" class="item-picker-empty" hidden>Barang tidak ditemukan. Coba kata kunci lain.</div>
+                        </div>
+                        <div id="item-picker-selected" class="item-picker-selected" hidden></div>
                     </div>
 
                     <div>
                         <label class="block text-xs font-medium text-slate-700 mb-1">Jumlah</label>
-                        <input type="number" name="quantity" min="1" value="1" required class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500">
+                        <input type="number" name="quantity" id="borrow-quantity" min="1" value="1" required class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500">
                     </div>
 
                     <div>
                         <label class="block text-xs font-medium text-slate-700 mb-1">Kondisi Awal Saat Dipinjam</label>
-                        <select name="condition" class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white focus:ring-2 focus:ring-indigo-500">
+                        <select name="condition" id="borrow-condition" class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white focus:ring-2 focus:ring-indigo-500">
                             <option value="baik">Baik</option>
                             <option value="rusak_ringan">Rusak Ringan</option>
                             <option value="rusak_berat">Rusak Berat</option>
                         </select>
+                        <small id="condition-stock-hint" class="mt-1 block text-xs text-slate-500">Pilih barang untuk melihat stok pada kondisi ini.</small>
                     </div>
 
                     <div class="md:col-span-3">
@@ -283,7 +348,7 @@ $transaksi_aktif = $conn->query($query_aktif . " LIMIT {$perPage} OFFSET {$offse
                                 <th class="px-4 py-3">Barang & Qty</th>
                                 <th class="px-4 py-3">Kondisi Awal</th>
                                 <th class="px-4 py-3">Batas Waktu</th>
-                                <th class="px-4 py-3 text-center">Aksi Pengembalian (Pilih Kondisi Akhir)</th>
+                                <th class="px-4 py-3 text-center">Kondisi Saat Kembali</th>
                             </tr>
                         </thead>
                         <tbody class="divide-y divide-slate-100">
@@ -294,6 +359,8 @@ $transaksi_aktif = $conn->query($query_aktif . " LIMIT {$perPage} OFFSET {$offse
                                     <td class="px-4 py-3 font-medium text-slate-800">
                                         <?php echo htmlspecialchars($row['borrower_name']); ?>
                                         <div class="text-xs font-normal text-slate-400"><?php echo htmlspecialchars($row['identity_number']); ?></div>
+                                        <div class="text-xs font-normal text-slate-500">NIK: <?php echo htmlspecialchars($row['borrower_nik'] ?: 'Belum diisi'); ?></div>
+                                        <div class="text-xs font-normal text-slate-500" style="max-width: 16rem; white-space: normal">Alamat: <?php echo htmlspecialchars($row['borrower_address'] ?: 'Belum diisi'); ?></div>
                                     </td>
                                     <td class="px-4 py-3 text-slate-800 font-medium">
                                         <?php echo htmlspecialchars($row['item_name']); ?> 
@@ -306,18 +373,32 @@ $transaksi_aktif = $conn->query($query_aktif . " LIMIT {$perPage} OFFSET {$offse
                                     </td>
                                     <td class="px-4 py-3 text-xs"><?php echo date('d M Y, H:i', strtotime($row['due_date'])); ?></td>
                                     <td class="px-4 py-3">
-                                        <!-- Form Inline untuk Memilih Kondisi Saat Pengembalian -->
-                                        <form action="" method="POST" class="flex items-center justify-center gap-2">
+                                        <form action="" method="POST" class="return-condition-form" data-return-quantity="<?php echo $returnQty = (int) $row['quantity']; ?>">
                                             <input type="hidden" name="borrowing_id" value="<?php echo $row['id']; ?>">
-                                            <select name="item_condition_after" required class="px-2 py-1.5 border border-slate-300 rounded-lg text-xs bg-white focus:ring-2 focus:ring-indigo-500">
-                                                <option value="baik">Kembali: Baik</option>
-                                                <option value="rusak_ringan">Kembali: Rusak Ringan</option>
-                                                <option value="rusak_berat">Kembali: Rusak Berat</option>
+                                            <?php $borrowedCondition = $row['item_condition_before'] ?? 'baik'; ?>
+                                            <label for="return-condition-<?php echo (int) $row['id']; ?>" class="return-condition-label">Pilih kondisi semua unit</label>
+                                            <select id="return-condition-<?php echo (int) $row['id']; ?>" class="return-condition-select" data-return-preset>
+                                                <option value="baik" <?php echo $borrowedCondition === 'baik' ? 'selected' : ''; ?>>Baik</option>
+                                                <option value="rusak_ringan" <?php echo $borrowedCondition === 'rusak_ringan' ? 'selected' : ''; ?>>Rusak ringan</option>
+                                                <option value="rusak_berat" <?php echo $borrowedCondition === 'rusak_berat' ? 'selected' : ''; ?>>Rusak berat</option>
                                             </select>
-                                            <button type="submit" name="proses_pengembalian" 
+                                            <button type="button" class="return-condition-toggle" aria-expanded="false" data-return-toggle>Atur kondisi campuran</button>
+                                            <div class="return-condition-mixed" data-return-mixed hidden>
+                                                <label>Baik
+                                                    <input type="number" name="returned_good_quantity" min="0" max="<?php echo $returnQty; ?>" value="<?php echo $borrowedCondition === 'baik' ? $returnQty : 0; ?>" required data-return-count="baik">
+                                                </label>
+                                                <label>Rusak ringan
+                                                    <input type="number" name="returned_light_damage_quantity" min="0" max="<?php echo $returnQty; ?>" value="<?php echo $borrowedCondition === 'rusak_ringan' ? $returnQty : 0; ?>" required data-return-count="rusak_ringan">
+                                                </label>
+                                                <label>Rusak berat
+                                                    <input type="number" name="returned_heavy_damage_quantity" min="0" max="<?php echo $returnQty; ?>" value="<?php echo $borrowedCondition === 'rusak_berat' ? $returnQty : 0; ?>" required data-return-count="rusak_berat">
+                                                </label>
+                                            </div>
+                                            <p class="return-condition-summary" data-return-summary><?php echo $returnQty; ?> unit kembali dalam kondisi <?php echo htmlspecialchars(str_replace('_', ' ', $borrowedCondition)); ?>.</p>
+                                            <button type="submit" name="proses_pengembalian"
                                                 onclick="return confirm('Konfirmasi pengembalian barang untuk transaksi #<?php echo $row['id']; ?>?');"
-                                                class="bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg text-xs font-medium transition shadow-sm">
-                                                Proses
+                                                class="return-condition-submit bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg text-xs font-medium transition shadow-sm">
+                                                Proses pengembalian
                                             </button>
                                         </form>
                                     </td>
@@ -362,5 +443,172 @@ $transaksi_aktif = $conn->query($query_aktif . " LIMIT {$perPage} OFFSET {$offse
             </div>
         </main>
     </div>
+<script>
+document.querySelectorAll('.return-condition-form').forEach((form) => {
+    const quantity = Number(form.dataset.returnQuantity);
+    const preset = form.querySelector('[data-return-preset]');
+    const mixedFields = form.querySelector('[data-return-mixed]');
+    const toggle = form.querySelector('[data-return-toggle]');
+    const summary = form.querySelector('[data-return-summary]');
+    const submit = form.querySelector('[type="submit"]');
+    const counts = Array.from(form.querySelectorAll('[data-return-count]'));
+
+    function applyPreset() {
+        counts.forEach((input) => {
+            input.value = input.dataset.returnCount === preset.value ? String(quantity) : '0';
+        });
+        updateSummary();
+    }
+
+    function updateSummary() {
+        const total = counts.reduce((sum, input) => sum + (Number(input.value) || 0), 0);
+        if (mixedFields.hidden) {
+            summary.textContent = `Seluruh ${quantity} unit kembali dalam kondisi ${preset.options[preset.selectedIndex].text.toLowerCase()}.`;
+            summary.classList.remove('is-invalid');
+            submit.disabled = false;
+            return;
+        }
+
+        summary.textContent = total === quantity
+            ? `Jumlah sesuai: ${total} dari ${quantity} unit.`
+            : `Jumlah kondisi ${total} dari ${quantity} unit. Sesuaikan agar totalnya ${quantity}.`;
+        summary.classList.toggle('is-invalid', total !== quantity);
+        submit.disabled = total !== quantity;
+    }
+
+    preset.addEventListener('change', applyPreset);
+    toggle.addEventListener('click', () => {
+        const opening = mixedFields.hidden;
+        mixedFields.hidden = !opening;
+        preset.disabled = opening;
+        toggle.setAttribute('aria-expanded', String(opening));
+        toggle.textContent = opening ? 'Pilih satu kondisi saja' : 'Atur kondisi campuran';
+        if (!opening) applyPreset();
+        else updateSummary();
+    });
+    counts.forEach((input) => input.addEventListener('input', updateSummary));
+    updateSummary();
+});
+
+(() => {
+    const picker = document.getElementById('item-picker');
+    const search = document.getElementById('item-search');
+    const itemId = document.getElementById('item-id');
+    const results = document.getElementById('item-picker-results');
+    const emptyState = document.getElementById('item-picker-empty');
+    const selectedCard = document.getElementById('item-picker-selected');
+    const condition = document.getElementById('borrow-condition');
+    const quantity = document.getElementById('borrow-quantity');
+    const stockHint = document.getElementById('condition-stock-hint');
+    const options = Array.from(picker.querySelectorAll('.item-picker-option'));
+    const stockKeys = {baik: 'good', rusak_ringan: 'light', rusak_berat: 'heavy'};
+    let selectedOption = null;
+
+    function showResults() {
+        results.hidden = false;
+        search.setAttribute('aria-expanded', 'true');
+        filterResults();
+    }
+
+    function hideResults() {
+        results.hidden = true;
+        search.setAttribute('aria-expanded', 'false');
+    }
+
+    function filterResults() {
+        const term = search.value.trim().toLocaleLowerCase();
+        let visibleCount = 0;
+        options.forEach((option) => {
+            const matches = option.dataset.search.includes(term);
+            option.hidden = !matches;
+            if (matches) visibleCount++;
+        });
+        emptyState.hidden = visibleCount > 0;
+    }
+
+    function updateConditionStock() {
+        if (!selectedOption) {
+            condition.querySelectorAll('option').forEach((option) => { option.disabled = false; });
+            quantity.removeAttribute('max');
+            stockHint.textContent = 'Pilih barang untuk melihat stok pada kondisi ini.';
+            return;
+        }
+
+        const stocks = {
+            baik: Number(selectedOption.dataset.good),
+            rusak_ringan: Number(selectedOption.dataset.light),
+            rusak_berat: Number(selectedOption.dataset.heavy)
+        };
+        condition.querySelectorAll('option').forEach((option) => {
+            option.disabled = stocks[option.value] === 0;
+        });
+        const stock = stocks[condition.value] || 0;
+        quantity.max = String(stock);
+        quantity.value = String(stock > 0 ? Math.min(Number(quantity.value) || 1, stock) : 1);
+        stockHint.textContent = `Tersedia ${stock} unit dalam kondisi ${condition.options[condition.selectedIndex].text.toLowerCase()}.`;
+    }
+
+    function selectItem(option) {
+        selectedOption = option;
+        itemId.value = option.dataset.id;
+        search.value = `${option.dataset.name} (${option.dataset.code})`;
+        search.setCustomValidity('');
+        selectedCard.replaceChildren();
+        const selectedName = document.createElement('strong');
+        selectedName.textContent = option.dataset.name;
+        const selectedCode = document.createElement('span');
+        selectedCode.textContent = option.dataset.code;
+        const selectedCounts = document.createElement('div');
+        [
+            `Baik ${option.dataset.good}`,
+            `Rusak ringan ${option.dataset.light}`,
+            `Rusak berat ${option.dataset.heavy}`
+        ].forEach((label) => {
+            const count = document.createElement('em');
+            count.textContent = label;
+            selectedCounts.append(count);
+        });
+        selectedCard.append(selectedName, selectedCode, selectedCounts);
+        selectedCard.hidden = false;
+
+        const firstStockedCondition = [
+            ['baik', option.dataset.good],
+            ['rusak_ringan', option.dataset.light],
+            ['rusak_berat', option.dataset.heavy]
+        ].find(([, stock]) => Number(stock) > 0);
+        if (firstStockedCondition) condition.value = firstStockedCondition[0];
+        hideResults();
+        updateConditionStock();
+    }
+
+    search.addEventListener('focus', () => {
+        if (itemId.value) search.select();
+        else showResults();
+    });
+    search.addEventListener('input', () => {
+        itemId.value = '';
+        selectedOption = null;
+        selectedCard.hidden = true;
+        search.setCustomValidity('');
+        updateConditionStock();
+        showResults();
+    });
+    search.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') hideResults();
+    });
+    options.forEach((option) => option.addEventListener('click', () => selectItem(option)));
+    condition.addEventListener('change', updateConditionStock);
+    document.addEventListener('click', (event) => {
+        if (!picker.contains(event.target)) hideResults();
+    });
+    document.getElementById('borrow-form').addEventListener('submit', (event) => {
+        if (!itemId.value) {
+            search.setCustomValidity('Pilih barang dari daftar hasil pencarian.');
+            search.reportValidity();
+            event.preventDefault();
+        }
+    });
+})();
+</script>
 </body>
 </html>

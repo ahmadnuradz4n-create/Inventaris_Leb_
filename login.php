@@ -9,7 +9,6 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
     $password = $_POST['password'];
 
     if (!empty($email) && !empty($password)) {
-        // Cari user berdasarkan email dan status aktif
         $stmt = $conn->prepare("SELECT id, name, email, password, role, status FROM users WHERE email = ?");
         $stmt->bind_param("s", $email);
         $stmt->execute();
@@ -18,14 +17,11 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
         if ($result->num_rows === 1) {
             $user = $result->fetch_assoc();
 
-            // Cek status akun
             if ($user['status'] === 'nonaktif') {
                 $error = "Akun Anda telah dinonaktifkan. Hubungi Administrator.";
             } 
-            // Password baru disimpan dalam bentuk hash; dukung juga akun lama
-            // yang masih menyimpan password teks biasa.
+
             elseif (password_verify($password, $user['password']) || hash_equals((string) $user['password'], $password)) {
-                // Migrasikan password akun lama ke hash setelah login berhasil.
                 if (!password_verify($password, $user['password'])) {
                     $hashed_password = password_hash($password, PASSWORD_DEFAULT);
                     $update = $conn->prepare("UPDATE users SET password = ?, updated_at = NOW() WHERE id = ?");
@@ -39,7 +35,6 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
                 $_SESSION['email']   = $user['email'];
                 $_SESSION['role']    = $user['role'];
 
-                // Redirect berdasarkan Role (Hanya Admin dan Peminjam)
                 if ($user['role'] === 'admin') {
                     header("Location: dashboard_admin.php");
                 } else {

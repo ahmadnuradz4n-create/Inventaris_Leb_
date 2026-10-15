@@ -2,7 +2,6 @@
 session_start();
 include 'koneksi.php';
 
-// Cek apakah user adalah admin
 if (!isset($_SESSION['user_id']) || $_SESSION['role'] !== 'admin') {
     header("Location: login.php");
     exit;
@@ -11,15 +10,22 @@ if (!isset($_SESSION['user_id']) || $_SESSION['role'] !== 'admin') {
 $success = '';
 $error = '';
 
-// 1. Proses Tambah Pengguna Baru
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['tambah_user'])) {
-    $name     = trim($_POST['name']);
-    $email    = trim($_POST['email']);
-    $password = password_hash($_POST['password'], PASSWORD_DEFAULT);
-    $role     = $_POST['role'];
+    $name     = trim($_POST['name'] ?? '');
+    $email    = trim($_POST['email'] ?? '');
+    $nik      = trim($_POST['nik'] ?? '');
+    $alamat   = trim($_POST['alamat'] ?? '');
+    $passwordInput = $_POST['password'] ?? '';
+    $role     = $_POST['role'] ?? '';
     $status   = 'aktif';
 
-    if (!empty($name) && !empty($email) && !empty($_POST['password'])) {
+    if ($name === '' || $email === '' || $passwordInput === '' || $alamat === '') {
+        $error = 'Nama, email, password, NIK, dan alamat wajib diisi.';
+    } elseif (!preg_match('/^[0-9]{16}$/', $nik)) {
+        $error = 'NIK harus terdiri dari tepat 16 digit angka.';
+    } elseif (!in_array($role, ['admin', 'peminjam'], true)) {
+        $error = 'Role pengguna tidak valid.';
+    } else {
         $check = $conn->prepare("SELECT id FROM users WHERE email = ?");
         $check->bind_param("s", $email);
         $check->execute();
@@ -28,50 +34,64 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['tambah_user'])) {
         if ($check->num_rows > 0) {
             $error = "Email tersebut sudah terdaftar di sistem!";
         } else {
-            $stmt = $conn->prepare("INSERT INTO users (name, email, password, role, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, NOW(), NOW())");
-            $stmt->bind_param("sssss", $name, $email, $password, $role, $status);
-            
-            if ($stmt->execute()) {
-                $success = "Pengguna baru berhasil ditambahkan!";
+            $nikCheck = $conn->prepare("SELECT id FROM users WHERE nik = ?");
+            $nikCheck->bind_param('s', $nik);
+            $nikCheck->execute();
+            $nikCheck->store_result();
+            if ($nikCheck->num_rows > 0) {
+                $error = 'NIK tersebut sudah digunakan oleh pengguna lain.';
             } else {
-                $error = "Gagal menambahkan pengguna: " . $stmt->error;
+                $password = password_hash($passwordInput, PASSWORD_DEFAULT);
+                $stmt = $conn->prepare("INSERT INTO users (name, email, password, nik, alamat, role, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), NOW())");
+                $stmt->bind_param('sssssss', $name, $email, $password, $nik, $alamat, $role, $status);
+                if ($stmt->execute()) {
+                    $success = 'Pengguna baru berhasil ditambahkan!';
+                } else {
+                    $error = 'Gagal menambahkan pengguna: ' . $stmt->error;
+                }
+                $stmt->close();
             }
-            $stmt->close();
+            $nikCheck->close();
         }
         $check->close();
-    } else {
-        $error = "Semua kolom wajib diisi!";
     }
 }
 
 // 2. Proses Edit Pengguna
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['edit_user'])) {
     $id       = intval($_POST['id']);
-    $name     = trim($_POST['name']);
-    $email    = trim($_POST['email']);
-    $role     = $_POST['role'];
-    $status   = $_POST['status'];
-    $password = $_POST['password'];
+    $name     = trim($_POST['name'] ?? '');
+    $email    = trim($_POST['email'] ?? '');
+    $nik      = trim($_POST['nik'] ?? '');
+    $alamat   = trim($_POST['alamat'] ?? '');
+    $role     = $_POST['role'] ?? '';
+    $status   = $_POST['status'] ?? '';
+    $password = $_POST['password'] ?? '';
 
-    if (!empty($name) && !empty($email)) {
-        // Cek apakah email sudah dipakai oleh user lain
-        $check = $conn->prepare("SELECT id FROM users WHERE email = ? AND id != ?");
-        $check->bind_param("si", $email, $id);
+    if ($name === '' || $email === '' || $alamat === '') {
+        $error = 'Nama, email, dan alamat wajib diisi.';
+    } elseif (!preg_match('/^[0-9]{16}$/', $nik)) {
+        $error = 'NIK harus terdiri dari tepat 16 digit angka.';
+    } elseif (!in_array($role, ['admin', 'peminjam'], true) || !in_array($status, ['aktif', 'nonaktif'], true)) {
+        $error = 'Role atau status pengguna tidak valid.';
+    } else {
+        $check = $conn->prepare("SELECT id, email, nik FROM users WHERE (email = ? OR nik = ?) AND id != ?");
+        $check->bind_param('ssi', $email, $nik, $id);
         $check->execute();
-        $check->store_result();
+        $duplicates = $check->get_result();
+        while ($duplicate = $duplicates->fetch_assoc()) {
+            if ($duplicate['email'] === $email) $error = 'Email sudah digunakan oleh pengguna lain.';
+            if ($duplicate['nik'] === $nik) $error = 'NIK sudah digunakan oleh pengguna lain.';
+        }
 
-        if ($check->num_rows > 0) {
-            $error = "Email sudah digunakan oleh pengguna lain!";
-        } else {
+        if ($error === '') {
             if (!empty($password)) {
-                // Jika password diisi, update beserta passwordnya
                 $hashed_password = password_hash($password, PASSWORD_DEFAULT);
-                $stmt = $conn->prepare("UPDATE users SET name = ?, email = ?, password = ?, role = ?, status = ?, updated_at = NOW() WHERE id = ?");
-                $stmt->bind_param("sssssi", $name, $email, $hashed_password, $role, $status, $id);
+                $stmt = $conn->prepare("UPDATE users SET name = ?, email = ?, nik = ?, alamat = ?, password = ?, role = ?, status = ?, updated_at = NOW() WHERE id = ?");
+                $stmt->bind_param('sssssssi', $name, $email, $nik, $alamat, $hashed_password, $role, $status, $id);
             } else {
-                // Jika password kosong, jangan ubah password
-                $stmt = $conn->prepare("UPDATE users SET name = ?, email = ?, role = ?, status = ?, updated_at = NOW() WHERE id = ?");
-                $stmt->bind_param("ssssi", $name, $email, $role, $status, $id);
+                $stmt = $conn->prepare("UPDATE users SET name = ?, email = ?, nik = ?, alamat = ?, role = ?, status = ?, updated_at = NOW() WHERE id = ?");
+                $stmt->bind_param('ssssssi', $name, $email, $nik, $alamat, $role, $status, $id);
             }
 
             if ($stmt->execute()) {
@@ -82,8 +102,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['edit_user'])) {
             $stmt->close();
         }
         $check->close();
-    } else {
-        $error = "Nama dan email wajib diisi!";
     }
 }
 
@@ -109,7 +127,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'delete' && isset($_GET['id'])
 $edit_data = null;
 if (isset($_GET['action']) && $_GET['action'] === 'edit' && isset($_GET['id'])) {
     $edit_id = intval($_GET['id']);
-    $q_edit = $conn->prepare("SELECT id, name, email, role, status FROM users WHERE id = ?");
+    $q_edit = $conn->prepare("SELECT id, name, email, nik, alamat, role, status FROM users WHERE id = ?");
     $q_edit->bind_param("i", $edit_id);
     $q_edit->execute();
     $res_edit = $q_edit->get_result();
@@ -120,7 +138,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'edit' && isset($_GET['id'])) 
 }
 
 // Ambil daftar seluruh pengguna dari database
-$users_list = $conn->query("SELECT id, name, email, role, status, created_at FROM users ORDER BY id DESC");
+$users_list = $conn->query("SELECT id, name, email, nik, alamat, role, status, created_at FROM users ORDER BY id DESC");
 ?>
 <!DOCTYPE html>
 <html lang="id">
@@ -180,7 +198,7 @@ $users_list = $conn->query("SELECT id, name, email, role, status, created_at FRO
                         <h3 class="font-bold text-amber-900">✏️ Edit Akun Pengguna: <?php echo htmlspecialchars($edit_data['name']); ?></h3>
                         <a href="pengguna.php" class="text-xs bg-slate-200 hover:bg-slate-300 text-slate-700 px-3 py-1 rounded-lg transition font-medium">Batal Edit</a>
                     </div>
-                    <form action="pengguna.php" method="POST" class="grid grid-cols-1 md:grid-cols-5 gap-4">
+                    <form action="pengguna.php" method="POST" class="grid grid-cols-1 md:grid-cols-3 gap-4">
                         <input type="hidden" name="id" value="<?php echo $edit_data['id']; ?>">
                         <div>
                             <label class="block text-xs font-medium text-slate-700 mb-1">Nama Lengkap</label>
@@ -190,6 +208,16 @@ $users_list = $conn->query("SELECT id, name, email, role, status, created_at FRO
                         <div>
                             <label class="block text-xs font-medium text-slate-700 mb-1">Email</label>
                             <input type="email" name="email" value="<?php echo htmlspecialchars($edit_data['email']); ?>" required class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white focus:ring-2 focus:ring-amber-500">
+                        </div>
+
+                        <div>
+                            <label class="block text-xs font-medium text-slate-700 mb-1">NIK / Nomor KTP</label>
+                            <input type="text" name="nik" value="<?php echo htmlspecialchars($edit_data['nik'] ?? '', ENT_QUOTES, 'UTF-8'); ?>" inputmode="numeric" pattern="[0-9]{16}" maxlength="16" minlength="16" required placeholder="16 digit NIK" class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white focus:ring-2 focus:ring-amber-500">
+                        </div>
+
+                        <div class="md:col-span-2">
+                            <label class="block text-xs font-medium text-slate-700 mb-1">Alamat Lengkap</label>
+                            <textarea name="alamat" rows="2" maxlength="500" required placeholder="Jalan, RT/RW, kelurahan, kecamatan, kota/kabupaten" class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white focus:ring-2 focus:ring-amber-500"><?php echo htmlspecialchars($edit_data['alamat'] ?? '', ENT_QUOTES, 'UTF-8'); ?></textarea>
                         </div>
 
                         <div>
@@ -213,7 +241,7 @@ $users_list = $conn->query("SELECT id, name, email, role, status, created_at FRO
                             </select>
                         </div>
 
-                        <div class="md:col-span-5 flex justify-end">
+                        <div class="md:col-span-3 flex justify-end">
                             <button type="submit" name="edit_user" class="bg-amber-600 hover:bg-amber-700 text-white font-medium px-6 py-2.5 rounded-lg text-sm transition shadow-sm">
                                 Simpan Perubahan
                             </button>
@@ -224,7 +252,7 @@ $users_list = $conn->query("SELECT id, name, email, role, status, created_at FRO
                 <!-- Form Tambah Pengguna Baru -->
                 <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
                     <h3 class="font-bold text-slate-800 mb-4 pb-2 border-b border-slate-100">➕ Tambah Akun Pengguna Baru</h3>
-                    <form action="" method="POST" class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                    <form action="" method="POST" class="grid grid-cols-1 md:grid-cols-3 gap-4">
                         <div>
                             <label class="block text-xs font-medium text-slate-700 mb-1">Nama Lengkap</label>
                             <input type="text" name="name" required placeholder="Contoh: Dr. Ahmad" class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500">
@@ -233,6 +261,16 @@ $users_list = $conn->query("SELECT id, name, email, role, status, created_at FRO
                         <div>
                             <label class="block text-xs font-medium text-slate-700 mb-1">Email</label>
                             <input type="email" name="email" required placeholder="Contoh: ahmad@lab.ac.id" class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500">
+                        </div>
+
+                        <div>
+                            <label class="block text-xs font-medium text-slate-700 mb-1">NIK / Nomor KTP</label>
+                            <input type="text" name="nik" required inputmode="numeric" pattern="[0-9]{16}" minlength="16" maxlength="16" placeholder="16 digit NIK" class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500">
+                        </div>
+
+                        <div class="md:col-span-2">
+                            <label class="block text-xs font-medium text-slate-700 mb-1">Alamat Lengkap</label>
+                            <textarea name="alamat" rows="2" maxlength="500" required placeholder="Jalan, RT/RW, kelurahan, kecamatan, kota/kabupaten" class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500"></textarea>
                         </div>
 
                         <div>
@@ -248,7 +286,7 @@ $users_list = $conn->query("SELECT id, name, email, role, status, created_at FRO
                             </select>
                         </div>
 
-                        <div class="md:col-span-4 flex justify-end">
+                        <div class="md:col-span-3 flex justify-end">
                             <button type="submit" name="tambah_user" class="bg-indigo-600 hover:bg-indigo-700 text-white font-medium px-6 py-2.5 rounded-lg text-sm transition shadow-sm">
                                 Simpan Pengguna Baru
                             </button>
@@ -269,6 +307,8 @@ $users_list = $conn->query("SELECT id, name, email, role, status, created_at FRO
                                 <th class="px-4 py-3">ID</th>
                                 <th class="px-4 py-3">Nama Lengkap</th>
                                 <th class="px-4 py-3">Email</th>
+                                <th class="px-4 py-3">NIK / KTP</th>
+                                <th class="px-4 py-3">Alamat</th>
                                 <th class="px-4 py-3">Role</th>
                                 <th class="px-4 py-3">Status</th>
                                 <th class="px-4 py-3">Terdaftar Sejak</th>
@@ -282,6 +322,8 @@ $users_list = $conn->query("SELECT id, name, email, role, status, created_at FRO
                                     <td class="px-4 py-3 font-mono text-xs">#<?php echo $row['id']; ?></td>
                                     <td class="px-4 py-3 font-medium text-slate-800"><?php echo htmlspecialchars($row['name']); ?></td>
                                     <td class="px-4 py-3 text-slate-600"><?php echo htmlspecialchars($row['email']); ?></td>
+                                    <td class="px-4 py-3 font-mono text-xs"><?php echo htmlspecialchars($row['nik'] ?: 'Belum diisi'); ?></td>
+                                    <td class="px-4 py-3 text-xs" style="max-width: 18rem; white-space: normal" title="<?php echo htmlspecialchars($row['alamat'] ?? '', ENT_QUOTES, 'UTF-8'); ?>"><?php echo htmlspecialchars($row['alamat'] ?: 'Belum diisi'); ?></td>
                                     <td class="px-4 py-3">
                                         <span class="px-2.5 py-1 rounded-full text-xs font-semibold <?php echo $row['role'] == 'admin' ? 'bg-indigo-50 text-indigo-600' : 'bg-amber-50 text-amber-600'; ?>">
                                             <?php echo ucfirst($row['role']); ?>
@@ -294,7 +336,7 @@ $users_list = $conn->query("SELECT id, name, email, role, status, created_at FRO
                                     </td>
                                     <td class="px-4 py-3 text-xs"><?php echo date('d M Y, H:i', strtotime($row['created_at'])); ?></td>
                                     <td class="px-4 py-3 text-center space-x-1">
-                                        <a href="edit_user.php?id=<?php echo $row['id']; ?>" 
+                                        <a href="pengguna.php?action=edit&id=<?php echo $row['id']; ?>" 
                                            class="bg-amber-500 hover:bg-amber-600 text-white px-3 py-1.5 rounded-lg text-xs font-medium transition shadow-sm inline-block">
                                             ✏️ Edit
                                         </a>
@@ -312,7 +354,7 @@ $users_list = $conn->query("SELECT id, name, email, role, status, created_at FRO
                                 <?php endwhile; ?>
                             <?php else: ?>
                                 <tr>
-                                    <td colspan="7" class="px-6 py-8 text-center text-slate-400">Belum ada pengguna lain yang terdaftar.</td>
+                                    <td colspan="9" class="px-6 py-8 text-center text-slate-400">Belum ada pengguna lain yang terdaftar.</td>
                                 </tr>
                             <?php endif; ?>
                         </tbody>

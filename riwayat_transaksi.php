@@ -9,12 +9,15 @@ if (!isset($_SESSION['user_id']) || $_SESSION['role'] !== 'admin') {
 }
 
 // AMBIL HANYA TRANSAKSI YANG SUDAH SELESAI (DIKEMBALIKAN)
-$query_riwayat = "SELECT b.id, br.name as borrower_name, br.identity_number, 
+$query_riwayat = "SELECT b.id, br.name as borrower_name, br.identity_number,
+                         u.nik AS borrower_nik, u.alamat AS borrower_address,
                          b.borrow_type, b.borrow_date, b.due_date, b.return_date, b.notes,
                          i.name as item_name, bd.quantity,
-                         bd.item_condition_before, bd.item_condition_after
+                         bd.item_condition_before, bd.item_condition_after,
+                         bd.returned_good_quantity, bd.returned_light_damage_quantity, bd.returned_heavy_damage_quantity
                   FROM borrowings b
                   JOIN borrowers br ON b.borrower_id = br.id
+                  LEFT JOIN users u ON u.id = br.user_id
                   JOIN borrowing_details bd ON b.id = bd.borrowing_id
                   JOIN items i ON bd.item_id = i.id
                   WHERE b.status = 'dikembalikan'
@@ -35,13 +38,15 @@ if (isset($_GET['export']) && $_GET['export'] === 'excel') {
     $output = fopen('php://output', 'w');
     fwrite($output, "\xEF\xBB\xBF");
     fputcsv($output, ['sep=;'], ';');
-    fputcsv($output, ['ID Transaksi', 'Nama Peminjam', 'Nomor Identitas', 'Nama Barang', 'Jumlah', 'Tipe Peminjaman', 'Tanggal Pinjam', 'Batas Waktu', 'Tanggal Dikembalikan', 'Kondisi Awal', 'Kondisi Akhir', 'Status', 'Catatan'], ';');
+    fputcsv($output, ['ID Transaksi', 'Nama Peminjam', 'Nomor Identitas', 'NIK / KTP', 'Alamat', 'Nama Barang', 'Jumlah', 'Tipe Peminjaman', 'Tanggal Pinjam', 'Batas Waktu', 'Tanggal Dikembalikan', 'Kondisi Awal', 'Kondisi Akhir', 'Status', 'Catatan'], ';');
 
     while ($row = $exportResult->fetch_assoc()) {
         $values = [
             $row['id'],
             $row['borrower_name'],
             $row['identity_number'],
+            $row['borrower_nik'] ?: 'Belum diisi',
+            $row['borrower_address'] ?: 'Belum diisi',
             $row['item_name'],
             $row['quantity'],
             ucfirst(str_replace('_', ' ', $row['borrow_type'])),
@@ -49,7 +54,9 @@ if (isset($_GET['export']) && $_GET['export'] === 'excel') {
             !empty($row['due_date']) ? date('Y-m-d H:i:s', strtotime($row['due_date'])) : '',
             !empty($row['return_date']) ? date('Y-m-d H:i:s', strtotime($row['return_date'])) : '',
             ucfirst(str_replace('_', ' ', $row['item_condition_before'] ?? 'belum dicatat')),
-            ucfirst(str_replace('_', ' ', $row['item_condition_after'] ?? 'belum dicatat')),
+            ((int) $row['returned_good_quantity'] + (int) $row['returned_light_damage_quantity'] + (int) $row['returned_heavy_damage_quantity'] > 0)
+                ? "Baik {$row['returned_good_quantity']}; Rusak ringan {$row['returned_light_damage_quantity']}; Rusak berat {$row['returned_heavy_damage_quantity']}"
+                : ucfirst(str_replace('_', ' ', $row['item_condition_after'] ?? 'belum dicatat')),
             'Dikembalikan',
             $row['notes'],
         ];
@@ -152,6 +159,8 @@ $riwayat_list = $conn->query($query_riwayat . " LIMIT {$perPage} OFFSET {$offset
                                     <td class="px-4 py-3 font-medium text-slate-800">
                                         <?php echo htmlspecialchars($row['borrower_name']); ?>
                                         <div class="text-xs font-normal text-slate-400"><?php echo htmlspecialchars($row['identity_number']); ?></div>
+                                        <div class="text-xs font-normal text-slate-500">NIK: <?php echo htmlspecialchars($row['borrower_nik'] ?: 'Belum diisi'); ?></div>
+                                        <div class="text-xs font-normal text-slate-500" style="max-width: 16rem; white-space: normal">Alamat: <?php echo htmlspecialchars($row['borrower_address'] ?: 'Belum diisi'); ?></div>
                                     </td>
                                     <td class="px-4 py-3 text-slate-800 font-medium">
                                         <?php echo htmlspecialchars($row['item_name']); ?> 
@@ -161,7 +170,11 @@ $riwayat_list = $conn->query($query_riwayat . " LIMIT {$perPage} OFFSET {$offset
                                         <?php echo htmlspecialchars(ucfirst(str_replace('_', ' ', $row['item_condition_before'] ?? 'belum dicatat'))); ?>
                                     </td>
                                     <td class="px-4 py-3 text-xs">
-                                        <?php echo htmlspecialchars(ucfirst(str_replace('_', ' ', $row['item_condition_after'] ?? 'belum dicatat'))); ?>
+                                        <?php if ((int) $row['returned_good_quantity'] + (int) $row['returned_light_damage_quantity'] + (int) $row['returned_heavy_damage_quantity'] > 0): ?>
+                                            Baik: <?php echo (int) $row['returned_good_quantity']; ?>, Rusak ringan: <?php echo (int) $row['returned_light_damage_quantity']; ?>, Rusak berat: <?php echo (int) $row['returned_heavy_damage_quantity']; ?>
+                                        <?php else: ?>
+                                            <?php echo htmlspecialchars(ucfirst(str_replace('_', ' ', $row['item_condition_after'] ?? 'belum dicatat'))); ?>
+                                        <?php endif; ?>
                                     </td>
                                     <td class="px-4 py-3 text-xs"><?php echo date('d M Y, H:i', strtotime($row['borrow_date'])); ?></td>
                                     <td class="px-4 py-3 text-xs"><?php echo date('d M Y, H:i', strtotime($row['return_date'])); ?></td>

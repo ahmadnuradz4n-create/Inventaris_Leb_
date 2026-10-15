@@ -32,7 +32,11 @@ CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_create_borrowing` (IN `p_borrowe
     START TRANSACTION;
 
     -- Cek ketersediaan stok barang
-    SELECT available_quantity INTO v_available_qty 
+    SELECT CASE p_condition
+      WHEN 'baik' THEN good_quantity
+      WHEN 'rusak_ringan' THEN light_damage_quantity
+      ELSE heavy_damage_quantity
+    END INTO v_available_qty
     FROM items WHERE id = p_item_id FOR UPDATE;
 
     IF v_available_qty < p_quantity THEN
@@ -51,9 +55,12 @@ CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_create_borrowing` (IN `p_borrowe
         VALUES (v_borrowing_id, p_item_id, p_quantity, p_condition, 'dipinjam');
 
         -- 3. Update stok tersedia di tabel items
-        UPDATE items 
-        SET available_quantity = available_quantity - p_quantity,
-            status = CASE WHEN (available_quantity - p_quantity) = 0 THEN 'dipinjam' ELSE status END
+        UPDATE items
+        SET good_quantity = good_quantity - IF(p_condition = 'baik', p_quantity, 0),
+          light_damage_quantity = light_damage_quantity - IF(p_condition = 'rusak_ringan', p_quantity, 0),
+          heavy_damage_quantity = heavy_damage_quantity - IF(p_condition = 'rusak_berat', p_quantity, 0),
+          available_quantity = available_quantity - p_quantity,
+          status = CASE WHEN (available_quantity - p_quantity) = 0 THEN 'dipinjam' ELSE 'tersedia' END
         WHERE id = p_item_id;
 
         -- 4. Catat ke tabel item_logs
@@ -164,7 +171,10 @@ CREATE TABLE `borrowing_details` (
   `quantity` int(11) NOT NULL,
   `item_condition_before` enum('baik','rusak_ringan','rusak_berat') DEFAULT 'baik',
   `item_condition_after` enum('baik','rusak_ringan','rusak_berat') DEFAULT NULL,
-  `status_item` enum('dipinjam','dikembalikan','hilang','rusak') DEFAULT 'dipinjam'
+  `status_item` enum('dipinjam','dikembalikan','hilang','rusak') DEFAULT 'dipinjam',
+  `returned_good_quantity` int(11) NOT NULL DEFAULT 0,
+  `returned_light_damage_quantity` int(11) NOT NULL DEFAULT 0,
+  `returned_heavy_damage_quantity` int(11) NOT NULL DEFAULT 0
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 --
@@ -239,6 +249,9 @@ CREATE TABLE `items` (
   `total_quantity` int(11) NOT NULL,
   `available_quantity` int(11) NOT NULL,
   `condition` enum('baik','rusak_ringan','rusak_berat') DEFAULT 'baik',
+  `good_quantity` int(11) NOT NULL DEFAULT 0,
+  `light_damage_quantity` int(11) NOT NULL DEFAULT 0,
+  `heavy_damage_quantity` int(11) NOT NULL DEFAULT 0,
   `status` enum('tersedia','dipinjam','hilang','pemeliharaan') DEFAULT 'tersedia',
   `location` varchar(100) DEFAULT NULL,
   `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
@@ -287,6 +300,9 @@ INSERT INTO `items` (`id`, `category_id`, `code`, `name`, `total_quantity`, `ava
 (34, 1, 'AGL-C01-001', 'gelas', 12, 12, 'baik', 'tersedia', 'Rak A-7', '2026-10-14 06:18:35', '2026-10-14 06:18:35', NULL),
 (35, 1, 'AGL-C01-002', 'gelas', 12, 12, 'baik', 'tersedia', 'Rak A-7', '2026-10-14 06:27:04', '2026-10-14 06:27:04', NULL),
 (36, 1, 'AGL-C01-003', 'gelas', 12, 12, 'baik', 'tersedia', 'Rak A-7', '2026-10-14 06:27:09', '2026-10-14 06:27:09', NULL);
+
+-- Per-condition stock counts are initialized by the compatibility migration in
+-- koneksi.php after all inventory and active-loan tables have been imported.
 
 -- --------------------------------------------------------
 
@@ -372,6 +388,8 @@ CREATE TABLE `users` (
   `name` varchar(100) NOT NULL,
   `email` varchar(100) NOT NULL,
   `password` varchar(255) NOT NULL,
+  `nik` varchar(16) DEFAULT NULL,
+  `alamat` text DEFAULT NULL,
   `role` enum('admin','peminjam') NOT NULL,
   `status` enum('aktif','nonaktif') DEFAULT 'aktif',
   `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
@@ -448,7 +466,8 @@ ALTER TABLE `item_logs`
 --
 ALTER TABLE `users`
   ADD PRIMARY KEY (`id`),
-  ADD UNIQUE KEY `email` (`email`);
+  ADD UNIQUE KEY `email` (`email`),
+  ADD UNIQUE KEY `uniq_users_nik` (`nik`);
 
 --
 -- AUTO_INCREMENT for dumped tables

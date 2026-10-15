@@ -21,31 +21,38 @@ $id = intval($_GET['id']);
 
 // Proses Simpan Perubahan Data
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_user'])) {
-    $name     = trim($_POST['name']);
-    $email    = trim($_POST['email']);
-    $role     = $_POST['role'];
-    $status   = $_POST['status'];
-    $password = $_POST['password'];
+    $name     = trim($_POST['name'] ?? '');
+    $email    = trim($_POST['email'] ?? '');
+    $nik      = trim($_POST['nik'] ?? '');
+    $alamat   = trim($_POST['alamat'] ?? '');
+    $role     = $_POST['role'] ?? '';
+    $status   = $_POST['status'] ?? '';
+    $password = $_POST['password'] ?? '';
 
-    if (!empty($name) && !empty($email)) {
-        // Cek apakah email sudah dipakai oleh user lain
-        $check = $conn->prepare("SELECT id FROM users WHERE email = ? AND id != ?");
-        $check->bind_param("si", $email, $id);
+    if ($name === '' || $email === '' || $alamat === '') {
+        $error = 'Nama, email, dan alamat wajib diisi.';
+    } elseif (!preg_match('/^[0-9]{16}$/', $nik)) {
+        $error = 'NIK harus terdiri dari tepat 16 digit angka.';
+    } elseif (!in_array($role, ['admin', 'peminjam'], true) || !in_array($status, ['aktif', 'nonaktif'], true)) {
+        $error = 'Role atau status pengguna tidak valid.';
+    } else {
+        $check = $conn->prepare("SELECT id, email, nik FROM users WHERE (email = ? OR nik = ?) AND id != ?");
+        $check->bind_param('ssi', $email, $nik, $id);
         $check->execute();
-        $check->store_result();
+        $duplicates = $check->get_result();
+        while ($duplicate = $duplicates->fetch_assoc()) {
+            if ($duplicate['email'] === $email) $error = 'Email sudah digunakan oleh pengguna lain.';
+            if ($duplicate['nik'] === $nik) $error = 'NIK sudah digunakan oleh pengguna lain.';
+        }
 
-        if ($check->num_rows > 0) {
-            $error = "Email sudah digunakan oleh pengguna lain!";
-        } else {
+        if ($error === '') {
             if (!empty($password)) {
-                // Jika password diisi, update beserta passwordnya
                 $hashed_password = password_hash($password, PASSWORD_DEFAULT);
-                $stmt = $conn->prepare("UPDATE users SET name = ?, email = ?, password = ?, role = ?, status = ?, updated_at = NOW() WHERE id = ?");
-                $stmt->bind_param("sssssi", $name, $email, $hashed_password, $role, $status, $id);
+                $stmt = $conn->prepare("UPDATE users SET name = ?, email = ?, nik = ?, alamat = ?, password = ?, role = ?, status = ?, updated_at = NOW() WHERE id = ?");
+                $stmt->bind_param('sssssssi', $name, $email, $nik, $alamat, $hashed_password, $role, $status, $id);
             } else {
-                // Jika password kosong, jangan ubah password
-                $stmt = $conn->prepare("UPDATE users SET name = ?, email = ?, role = ?, status = ?, updated_at = NOW() WHERE id = ?");
-                $stmt->bind_param("ssssi", $name, $email, $role, $status, $id);
+                $stmt = $conn->prepare("UPDATE users SET name = ?, email = ?, nik = ?, alamat = ?, role = ?, status = ?, updated_at = NOW() WHERE id = ?");
+                $stmt->bind_param('ssssssi', $name, $email, $nik, $alamat, $role, $status, $id);
             }
 
             if ($stmt->execute()) {
@@ -56,13 +63,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_user'])) {
             $stmt->close();
         }
         $check->close();
-    } else {
-        $error = "Nama dan email wajib diisi!";
     }
 }
 
 // Ambil data user berdasarkan ID
-$stmt_get = $conn->prepare("SELECT id, name, email, role, status FROM users WHERE id = ?");
+$stmt_get = $conn->prepare("SELECT id, name, email, nik, alamat, role, status FROM users WHERE id = ?");
 $stmt_get->bind_param("i", $id);
 $stmt_get->execute();
 $result = $stmt_get->get_result();
@@ -149,6 +154,16 @@ $stmt_get->close();
                         <div>
                             <label class="block text-xs font-medium text-slate-700 mb-1">Email</label>
                             <input type="email" name="email" value="<?php echo htmlspecialchars($user['email']); ?>" required class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500">
+                        </div>
+
+                        <div>
+                            <label class="block text-xs font-medium text-slate-700 mb-1">NIK / Nomor KTP</label>
+                            <input type="text" name="nik" value="<?php echo htmlspecialchars($user['nik'] ?? '', ENT_QUOTES, 'UTF-8'); ?>" inputmode="numeric" pattern="[0-9]{16}" minlength="16" maxlength="16" required placeholder="16 digit NIK" class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500">
+                        </div>
+
+                        <div class="md:col-span-2">
+                            <label class="block text-xs font-medium text-slate-700 mb-1">Alamat Lengkap</label>
+                            <textarea name="alamat" rows="2" maxlength="500" required placeholder="Jalan, RT/RW, kelurahan, kecamatan, kota/kabupaten" class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500"><?php echo htmlspecialchars($user['alamat'] ?? '', ENT_QUOTES, 'UTF-8'); ?></textarea>
                         </div>
                     </div>
 

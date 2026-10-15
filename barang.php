@@ -140,14 +140,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['update_barang']) || 
             $code = trim($_POST['code'] ?? '');
             $name = trim($_POST['name'] ?? '');
             $category_id = (int) ($_POST['category_id'] ?? 0);
-            $quantity = (int) ($_POST['total_quantity'] ?? 0);
-            $condition = $_POST['condition'] ?? '';
+            $goodQuantity = (int) ($_POST['good_quantity'] ?? 0);
+            $lightDamageQuantity = (int) ($_POST['light_damage_quantity'] ?? 0);
+            $heavyDamageQuantity = (int) ($_POST['heavy_damage_quantity'] ?? 0);
             $location = trim($_POST['location'] ?? '');
-            $validConditions = ['baik', 'rusak_ringan', 'rusak_berat'];
+            $available = $goodQuantity + $lightDamageQuantity + $heavyDamageQuantity;
 
             if ($currentItem['deleted_at'] !== null) {
                 $error = 'Pulihkan barang terlebih dahulu sebelum mengeditnya.';
-            } elseif ($code === '' || $name === '' || $category_id <= 0 || $quantity <= 0 || !in_array($condition, $validConditions, true)) {
+            } elseif ($code === '' || $name === '' || $category_id <= 0 || min($goodQuantity, $lightDamageQuantity, $heavyDamageQuantity) < 0) {
                 $error = 'Lengkapi data barang dengan benar.';
             } else {
                 if ($category_id !== (int) $currentItem['category_id']) {
@@ -174,14 +175,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['update_barang']) || 
                     $check->close();
                 }
 
-                $checkedOut = (int) $currentItem['total_quantity'] - (int) $currentItem['available_quantity'];
-                if ($error === '' && $quantity < $checkedOut) {
-                    $error = "Jumlah total tidak boleh kurang dari {$checkedOut} unit yang sedang dipinjam/tidak tersedia.";
-                }
+                $checkedOutStmt = $conn->prepare("SELECT COALESCE(SUM(bd.quantity), 0) AS total FROM borrowing_details bd JOIN borrowings b ON b.id = bd.borrowing_id WHERE bd.item_id = ? AND b.status IN ('dipinjam', 'terlambat')");
+                $checkedOutStmt->bind_param('i', $item_id);
+                $checkedOutStmt->execute();
+                $checkedOut = (int) $checkedOutStmt->get_result()->fetch_assoc()['total'];
+                $checkedOutStmt->close();
+                $quantity = $available + $checkedOut;
+                if ($error === '' && $quantity <= 0) $error = 'Jumlah barang harus lebih dari nol.';
                 if ($error === '') {
-                    $available = $quantity - $checkedOut;
-                    $stmt = $conn->prepare("UPDATE items SET category_id = ?, code = ?, name = ?, total_quantity = ?, available_quantity = ?, `condition` = ?, location = ? WHERE id = ? AND deleted_at IS NULL");
-                    $stmt->bind_param('issiissi', $category_id, $code, $name, $quantity, $available, $condition, $location, $item_id);
+                    $stmt = $conn->prepare("UPDATE items SET category_id = ?, code = ?, name = ?, total_quantity = ?, available_quantity = ?, good_quantity = ?, light_damage_quantity = ?, heavy_damage_quantity = ?, location = ? WHERE id = ? AND deleted_at IS NULL");
+                    $stmt->bind_param('issiiiiisi', $category_id, $code, $name, $quantity, $available, $goodQuantity, $lightDamageQuantity, $heavyDamageQuantity, $location, $item_id);
                     if ($stmt->execute()) {
                         $stmt->close();
                         $description = "Data barang '{$name}' (kode '{$code}') diperbarui.";
@@ -204,12 +207,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['update_barang']) || 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['tambah_barang'])) {
     $name        = trim($_POST['name']);
     $category_id = intval($_POST['category_id']);
-    $quantity    = intval($_POST['total_quantity']);
-    $condition   =$_POST['condition'];
+    $goodQuantity = (int) ($_POST['good_quantity'] ?? 0);
+    $lightDamageQuantity = (int) ($_POST['light_damage_quantity'] ?? 0);
+    $heavyDamageQuantity = (int) ($_POST['heavy_damage_quantity'] ?? 0);
+    $quantity = $goodQuantity + $lightDamageQuantity + $heavyDamageQuantity;
     $location    = trim($_POST['location']);
 
     if (!isset($_POST['csrf_token']) || !hash_equals($_SESSION['barang_csrf_token'], (string) $_POST['csrf_token'])) {
         $error = 'Permintaan tidak valid. Muat ulang halaman lalu coba lagi.';
+    } elseif (min($goodQuantity, $lightDamageQuantity, $heavyDamageQuantity) < 0) {
+        $error = 'Jumlah kondisi tidak boleh kurang dari nol.';
     } elseif (!empty($name) && $category_id > 0 && $quantity > 0) {
         $categoryStmt = $conn->prepare("SELECT name FROM categories WHERE id = ?");
         $categoryStmt->bind_param('i', $category_id);
@@ -234,10 +241,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['tambah_barang'])) {
 
             try {
                 // 1. Insert ke tabel items (available_quantity disamakan dengan total_quantity saat pertama dibuat)
-                $stmt =$conn->prepare("INSERT INTO items (category_id, code, name, total_quantity, available_quantity, `condition`, status, location) VALUES (?, ?, ?, ?, ?, ?, 'tersedia', ?)");
-                $stmt->bind_param("issiiss", $category_id,$code, $name,$quantity, $quantity,$condition, $location);$stmt->execute();
-                $item_id =$stmt->insert_id;
-                $stmt->close();
+                    $stmt =$conn->prepare("INSERT INTO items (category_id, code, name, total_quantity, available_quantity, good_quantity, light_damage_quantity, heavy_damage_quantity, `condition`, status, location) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'baik', 'tersedia', ?)");
+                    $stmt->bind_param("issiiiiis", $category_id, $code, $name, $quantity, $quantity, $goodQuantity, $lightDamageQuantity, $heavyDamageQuantity, $location);
+                    if (!$stmt->execute()) throw new RuntimeException($stmt->error);
+                    $stmt->close();
+                    $item_id = $conn->insert_id;
 
                 // 2. Catat ke tabel item_logs (Fitur 8)
                 $log_desc = "Barang baru '{$name}' dengan kode '{$code}' ditambahkan sebanyak {$quantity} unit.";
@@ -259,6 +267,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['tambah_barang'])) {
 
 // Ambil data barang yang akan diedit.
 $edit_data = null;
+$editCheckedOut = 0;
 if (isset($_GET['edit'])) {
     $edit_id = (int) $_GET['edit'];
     $editStmt = $conn->prepare("SELECT * FROM items WHERE id = ? AND deleted_at IS NULL");
@@ -266,6 +275,13 @@ if (isset($_GET['edit'])) {
     $editStmt->execute();
     $edit_data = $editStmt->get_result()->fetch_assoc();
     $editStmt->close();
+    if ($edit_data) {
+        $checkedOutStmt = $conn->prepare("SELECT COALESCE(SUM(bd.quantity), 0) AS total FROM borrowing_details bd JOIN borrowings b ON b.id = bd.borrowing_id WHERE bd.item_id = ? AND b.status IN ('dipinjam', 'terlambat')");
+        $checkedOutStmt->bind_param('i', $edit_id);
+        $checkedOutStmt->execute();
+        $editCheckedOut = (int) $checkedOutStmt->get_result()->fetch_assoc()['total'];
+        $checkedOutStmt->close();
+    }
 }
 
 // Ambil kategori dan contoh kode berikutnya untuk dropdown tambah barang.
@@ -402,20 +418,23 @@ $items = $itemsStmt->get_result();
                                 <?php endif; ?>
                             </select>
                         </div>
-                        <div class="grid grid-cols-2 gap-3">
+                        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
                             <div>
-                                <label class="block text-xs font-medium text-slate-700 mb-1">Jumlah Total</label>
-                                <input type="number" name="total_quantity" min="1" required value="<?php echo htmlspecialchars((string) ($edit_data['total_quantity'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>" placeholder="10" 
-                                    class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                                <label class="block text-xs font-medium text-slate-700 mb-1">Jumlah kondisi baik</label>
+                                <input type="number" name="good_quantity" min="0" value="<?php echo (int) ($edit_data['good_quantity'] ?? 0); ?>" required oninput="updateConditionTotal()" class="condition-count w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500">
                             </div>
                             <div>
-                                <label class="block text-xs font-medium text-slate-700 mb-1">Kondisi</label>
-                                <select name="condition" class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
-                                    <option value="baik" <?php echo ($edit_data['condition'] ?? 'baik') === 'baik' ? 'selected' : ''; ?>>Baik</option>
-                                    <option value="rusak_ringan" <?php echo ($edit_data['condition'] ?? '') === 'rusak_ringan' ? 'selected' : ''; ?>>Rusak Ringan</option>
-                                    <option value="rusak_berat" <?php echo ($edit_data['condition'] ?? '') === 'rusak_berat' ? 'selected' : ''; ?>>Rusak Berat</option>
-                                </select>
+                                <label class="block text-xs font-medium text-slate-700 mb-1">Rusak ringan</label>
+                                <input type="number" name="light_damage_quantity" min="0" value="<?php echo (int) ($edit_data['light_damage_quantity'] ?? 0); ?>" required oninput="updateConditionTotal()" class="condition-count w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500">
                             </div>
+                            <div>
+                                <label class="block text-xs font-medium text-slate-700 mb-1">Rusak berat</label>
+                                <input type="number" name="heavy_damage_quantity" min="0" value="<?php echo (int) ($edit_data['heavy_damage_quantity'] ?? 0); ?>" required oninput="updateConditionTotal()" class="condition-count w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500">
+                            </div>
+                        </div>
+                        <div class="rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-600">
+                            Total barang: <strong id="condition_total"><?php echo $edit_data ? (int) $edit_data['good_quantity'] + (int) $edit_data['light_damage_quantity'] + (int) $edit_data['heavy_damage_quantity'] + $editCheckedOut : 0; ?></strong> unit
+                            <?php if ($edit_data && $editCheckedOut > 0): ?><span class="text-xs text-slate-500">(termasuk <?php echo $editCheckedOut; ?> unit yang sedang dipinjam)</span><?php endif; ?>
                         </div>
                         <div>
                             <label class="block text-xs font-medium text-slate-700 mb-1">Lokasi Penyimpanan</label>
@@ -522,14 +541,11 @@ $items = $itemsStmt->get_result();
                                             <span class="text-slate-400"><?php echo $row['total_quantity']; ?></span>
                                         </td>
                                         <td class="px-4 py-3">
-                                            <span class="px-2 py-0.5 rounded-full text-xs font-semibold 
-                                                <?php 
-                                                    if($row['condition'] == 'baik') echo 'bg-emerald-50 text-emerald-600';
-                                                    elseif($row['condition'] == 'rusak_ringan') echo 'bg-amber-50 text-amber-600';
-                                                    else echo 'bg-red-50 text-red-600';
-                                                ?>">
-                                                <?php echo ucfirst($row['condition']); ?>
-                                            </span>
+                                            <div class="flex flex-wrap gap-1 text-xs">
+                                                <span class="rounded-full bg-emerald-50 px-2 py-0.5 text-emerald-700">Baik: <?php echo (int) $row['good_quantity']; ?></span>
+                                                <span class="rounded-full bg-amber-50 px-2 py-0.5 text-amber-700">Ringan: <?php echo (int) $row['light_damage_quantity']; ?></span>
+                                                <span class="rounded-full bg-red-50 px-2 py-0.5 text-red-700">Berat: <?php echo (int) $row['heavy_damage_quantity']; ?></span>
+                                            </div>
                                         </td>
                                         <td class="px-4 py-3 text-xs font-mono text-slate-500"><?php echo htmlspecialchars($row['location']); ?></td>
                                         <td class="px-4 py-3 text-center whitespace-nowrap">
@@ -598,6 +614,15 @@ function updateItemCodePreview() {
         codeInput.value = selectedOption.dataset.nextCode;
     }
 }
+
+function updateConditionTotal() {
+    const counts = Array.from(document.querySelectorAll('.condition-count'));
+    const availableTotal = counts.reduce((sum, input) => sum + Math.max(0, Number(input.value) || 0), 0);
+    const checkedOut = <?php echo (int) $editCheckedOut; ?>;
+    const total = document.getElementById('condition_total');
+    if (total) total.textContent = String(availableTotal + checkedOut);
+}
+updateConditionTotal();
 </script>
 </body>
 </html>
