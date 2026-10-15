@@ -6,7 +6,7 @@ $error = '';
 
 if ($_SERVER['REQUEST_METHOD'] == 'POST') {
     $email    = trim($_POST['email']);
-    $password = trim($_POST['password']);
+    $password = $_POST['password'];
 
     if (!empty($email) && !empty($password)) {
         // Cari user berdasarkan email dan status aktif
@@ -22,8 +22,18 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
             if ($user['status'] === 'nonaktif') {
                 $error = "Akun Anda telah dinonaktifkan. Hubungi Administrator.";
             } 
-            // Verifikasi Password
-            elseif ($password === $user['password']) {
+            // Password baru disimpan dalam bentuk hash; dukung juga akun lama
+            // yang masih menyimpan password teks biasa.
+            elseif (password_verify($password, $user['password']) || hash_equals((string) $user['password'], $password)) {
+                // Migrasikan password akun lama ke hash setelah login berhasil.
+                if (!password_verify($password, $user['password'])) {
+                    $hashed_password = password_hash($password, PASSWORD_DEFAULT);
+                    $update = $conn->prepare("UPDATE users SET password = ?, updated_at = NOW() WHERE id = ?");
+                    $update->bind_param("si", $hashed_password, $user['id']);
+                    $update->execute();
+                    $update->close();
+                }
+
                 $_SESSION['user_id'] = $user['id'];
                 $_SESSION['name']    = $user['name'];
                 $_SESSION['email']   = $user['email'];
